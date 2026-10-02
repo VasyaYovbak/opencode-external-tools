@@ -1,13 +1,57 @@
 # OpenCode External Tools
 
-Плагін для **OpenCode v2.0.22**: клієнт реєструє іменовані tools для конкретної сесії,
-отримує виклики через події, виконує їх зовні (OpenWebUI, n8n, Python тощо) та
-повертає результат через HTTP API OpenCode. MCP-сервер і форк OpenCode не потрібні.
+**Let OpenCode use tools that live in another application, without an MCP server
+or changes to the agent backend.** Tested with OpenCode **v2.0.22**.
 
-## Встановлення
+## Why this plugin exists
 
-Додай запис до `plugins` у **наявному** `opencode.json(c)` проєкту або глобальному
-`~/.config/opencode/opencode.json(c)`, не замінюючи інші налаштування:
+An application such as **OpenWebUI** can have its own tool environment: tools
+created in the UI, application-specific functions, credentials, and execution
+context. Those tools already work inside the application, but they may not be
+exposed through MCP or any standalone service. An external agent cannot simply
+connect to that environment and start using them.
+
+This plugin bridges that gap. Your application selects the tools available for a
+request or session and sends their **names, descriptions, and input schemas** to
+OpenCode. The agent sees ordinary named tools and can call them. Your application
+receives each call, runs the tool in its existing environment, and returns the
+result so the agent can continue.
+
+The tool implementations stay outside OpenCode. Users can create or change tools
+in your UI without rebuilding or modifying the agent backend. You do not need to
+turn every tool into an MCP server or maintain an OpenCode fork.
+
+Useful hosts include OpenWebUI, n8n, a Python application, or any service that
+already knows how to execute its own tools.
+
+## How it works
+
+```text
+Your application selects and registers tool definitions
+    → OpenCode presents the named tools to the model
+    → The model calls a tool
+    → The plugin emits a requested event and waits
+    → Your application executes the tool externally
+    → Your application returns the result through HTTP RPC
+    → OpenCode passes the result to the model and continues
+```
+
+**Scope:** registration is session-scoped. To select tools for a particular
+request, register the desired set before submitting its prompt, then unregister
+it after the request finishes if it is no longer needed. For independently scoped
+or concurrent requests, use separate sessions. The plugin does **not** add an
+`externalTools` field to OpenCode's native prompt API.
+
+**Host integration is required:** this is a bridge, not an automatic OpenWebUI
+connector. Your application must register tool definitions, consume calls, invoke
+its existing tool executor, and return results. Installing the plugin alone does
+not discover or execute tools from another application's UI.
+
+## Installation
+
+Add the following entry to `plugins` in your **existing** project
+`opencode.json(c)` or global `~/.config/opencode/opencode.json(c)`. Preserve your
+other settings and plugin entries:
 
 ```jsonc
 {
@@ -21,13 +65,16 @@
 }
 ```
 
-OpenCode сам завантажує GitHub-пакет і встановлює залежності. Готовий `dist/`
-включений у Git, тому клонувати репозиторій, ставити TypeScript чи запускати
-`npm run build:plugin` користувачу не потрібно. На першому старті дочекайся завершення
-фонової установки плагіна. Тег фіксує версію; для строгого pin можна вказати
-повний commit hash замість `v0.1.1`.
+OpenCode downloads the GitHub package and installs its dependencies automatically.
+Prebuilt files in `dist/` are included in Git: users do not need to clone the
+repository, install TypeScript, or run `npm run build:plugin`. On first startup,
+allow the background package installation to finish. The tag selects a release;
+for a strict pin, use a full commit hash instead of `v0.1.1`.
 
-### Локальна розробка
+`timeoutMs` is the maximum time to wait for an external response. It defaults to
+120 seconds and accepts integers from 1 to 3600000 milliseconds.
+
+### Local development
 
 ```sh
 git clone https://github.com/VasyaYovbak/opencode-external-tools.git
@@ -38,19 +85,18 @@ npm run typecheck
 npm test
 ```
 
-Для локальної розробки заміни `package` на абсолютний шлях до цієї папки.
-Після змін у `src/` запускай `npm run build:plugin`, потім перезавантаж конфігурацію OpenCode.
-Перед новим релізом включай оновлений `dist/` у commit разом із вихідними файлами.
-Скрипт навмисно названо `build:plugin`, не `build`: npm інакше запускає зайву
-Git-підготовку з установкою dev-залежностей навіть для готового пакета.
-Кореневий `index.js` потрібен завантажувачу локальних директорій v2; він відкриває
-зібраний JavaScript у `dist/` без залежності від runtime-завантаження TypeScript.
-`timeoutMs` — час очікування зовнішньої відповіді,
-за замовчуванням 120 секунд; допустимий діапазон 1–3600000 мс.
+For local development, replace `package` with the absolute path to this directory.
+After changing `src/`, run `npm run build:plugin` and reload the OpenCode
+configuration. Before a release, commit the updated `dist/` alongside the source.
+The script is deliberately named `build:plugin`, not `build`: otherwise npm
+triggers unnecessary Git dependency preparation and installs development
+dependencies even though the package is already built.
+The root `index.js` is required by v2's local directory loader. It loads compiled
+JavaScript from `dist/` without runtime TypeScript loading.
 
-## Контракт
+## API contract
 
-RPC ID: `external_tools`. Усі методи викликаються через:
+RPC ID: `external_tools`. All methods are available through:
 
 ```text
 POST /api/rpc/external_tools/{method}
@@ -59,17 +105,18 @@ Content-Type: application/json
 {"input": ...}
 ```
 
-Результат HTTP: `{"output": ...}`; `resolve` та `unregister` повертають `{"output": true}`.
-Використовуй автентифікацію свого сервера. Для керованого локального service клієнт
-може використати `Service.discover()` і `Service.headers()` — дивись приклад.
+HTTP responses use `{"output": ...}`; `resolve` and `unregister` return
+`{"output": true}`. Use your server's authentication. For a managed local service,
+clients can use `Service.discover()` and `Service.headers()`; see the example.
 
-**Важливо:** RPC виконується у location, де завантажений плагін. Передавай
-`location[directory]` у query, або `{ location: { directory } }` другим аргументом
-методу TypeScript-клієнта. Вона повинна збігатися з location сесії.
+**Important:** RPC runs at the location where the plugin is loaded. Pass
+`location[directory]` as a query parameter, or `{ location: { directory } }` as
+the TypeScript client's second method argument. It must match the session's
+location.
 
-### 1. Зареєструвати tools
+### 1. Register tools
 
-Спочатку створи сесію штатним API v2. Потім виклич `register`:
+First create a session through OpenCode's native v2 API. Then call `register`:
 
 ```json
 {
@@ -91,23 +138,26 @@ Content-Type: application/json
 }
 ```
 
-`register` замінює набір для сесії, а не додає до попереднього. Невалідна реєстрація
-залишає попередній набір незмінним. Схеми компілюються до валідаторів Effect до
-реєстрації; коренева схема має бути `type: "object"`.
-Підтримується підмножина JSON Schema валідатора Effect, не повна специфікація.
-Зокрема `pattern`/`patternProperties` відхиляються за замовчуванням Effect через
-ризик необмеженого часу виконання regex. Для критичних перевірок додатково
-валідуй аргументи у зовнішньому executor; не покладайся на специфічні `format`
-чи інші розширення JSON Schema, не підтримані Effect.
+`register` **replaces** the session's tool set; it does not append to the previous
+set. An invalid registration leaves the previous set unchanged. Schemas are
+compiled into Effect validators before registration. The root schema must have
+`type: "object"`.
 
-Для різних сесій можна використати однакові імена з різними схемами. Модель бачить
-передані імена (`get_weather`), а не універсальний wrapper. Внутрішні ID ізольовані;
-tools працюють без Code Mode. Не можна дублювати імена або перекривати штатні tools
-(зокрема `read`, `execute`). Дочірні сесії не успадковують зовнішній набір.
+Effect supports a subset of JSON Schema, not the full specification. In
+particular, `pattern` and `patternProperties` are rejected by default because
+regular expression evaluation can take unbounded time. Validate critical
+constraints again in your external executor; do not rely on unsupported `format`
+values or other JSON Schema extensions.
 
-### 2. Отримати виклик
+Different sessions may use the same tool name with different schemas. The model
+sees your tool names, such as `get_weather`, rather than a generic wrapper.
+Internal IDs are isolated, and tools are exposed directly without Code Mode.
+Duplicate names within a set and collisions with native tools, including `read`
+and `execute`, are not allowed. Child sessions do not inherit external tool sets.
 
-Підпишись **до** надсилання prompt на подію `rpc.external_tools.requested`:
+### 2. Receive a call
+
+Subscribe to `rpc.external_tools.requested` **before** submitting the prompt:
 
 ```ts
 import { ExternalTools } from "opencode-external-tools/rpc"
@@ -133,13 +183,13 @@ for await (const event of bridge.events.subscribe("requested")) {
 }
 ```
 
-Фільтруй location та `sessionID`: штатна event-підписка містить події з різних
-location. `callID` — унікальний ID **моста**, який слід повертати у `resolve`;
-`toolCallID` — інформаційний ID виклику моделі, який може повторюватися.
+Filter by location and `sessionID`: event subscriptions include events from
+multiple locations. `callID` is the unique **bridge** ID to send back in `resolve`.
+`toolCallID` is the model's informational tool-call ID and may be reused.
 
-### 3. Повернути результат
+### 3. Return a result
 
-Метод `resolve`:
+Call `resolve`:
 
 ```json
 {
@@ -155,31 +205,41 @@ location. `callID` — унікальний ID **моста**, який слід
 }
 ```
 
-Або помилку: `{"input":{"sessionID":"ses_...","callID":"...","error":"Service unavailable"}}`.
-Передай рівно одне з `result` / `error`. `output` — текст для моделі; для JSON-відповіді
-використай `JSON.stringify(...)`. `title` і `metadata` необов'язкові. Повторна,
-прострочена або адресована іншій сесії відповідь отримує `not_found`.
+Or return an error:
 
-### Перепідключення й завершення
+```json
+{"input":{"sessionID":"ses_...","callID":"...","error":"Service unavailable"}}
+```
 
-- `pending({ sessionID })` → `{ calls: [...] }` — поточні виклики лише цієї сесії.
-- `unregister({ sessionID })` — видаляє набір і скасовує pending-виклики сесії.
-- Заміна набору не скасовує вже надіслані виклики; їх можна завершити за старим `callID`.
-- Зупинка сесії, таймаут і unload плагіна завершують очікування та прибирають pending.
+Provide exactly one of `result` or `error`. `output` is the text sent to the model;
+use `JSON.stringify(...)` for a JSON result. `title` and `metadata` are optional.
+Duplicate, expired, or wrong-session responses receive `not_found`.
 
-RPC-події **live-only**, без replay. Після перепідключення підпишись знову та отримай
-`pending`; також можна періодично опитувати цей метод. Подія і `pending` можуть
-містити один виклик: дедуплікуй за `callID` **до виконання побічних ефектів**.
+### Reconnection and cleanup
 
-## Приклад клієнта
+- `pending({ sessionID })` returns `{ calls: [...] }` for that session only.
+- `unregister({ sessionID })` removes the tool set and cancels its pending calls.
+- Replacing a set does not cancel calls already dispatched. Complete them using
+  their existing `callID`.
+- Session interruption, timeout, and plugin unload end the wait and remove
+  pending calls.
 
-Після встановлення плагіна в потрібному location:
+RPC events are **live-only**, with no replay. After reconnecting, subscribe again
+and fetch `pending`; you can also poll this method periodically. An event and
+`pending` may describe the same call. Deduplicate by `callID` **before performing
+side effects**.
+
+## Client example
+
+From a local development checkout, with the plugin installed at the target
+location:
 
 ```sh
 OPENCODE_DIRECTORY=/absolute/path/to/project bun run demo
 ```
 
-Приклад використовує вже запущений локальний service, або явно заданий сервер:
+The example uses an already-running local service, or an explicitly selected
+server:
 
 ```sh
 OPENCODE_URL=http://127.0.0.1:4096 \
@@ -187,45 +247,50 @@ OPENCODE_DIRECTORY=/absolute/path/to/project \
 OPENCODE_AUTHORIZATION='Bearer ...' bun run demo
 ```
 
-Авторизацію бери з налаштувань свого сервера, не копіюй токени в конфігурацію
-плагіна. Демо повертає **вигадану погоду**, це не погодний сервіс.
+Use your server's configured authentication; do not copy tokens into the plugin
+configuration. The demo returns **fictional weather** and is not a weather
+service.
 
-## Перевірки
+## Tests
 
 ```sh
 npm run typecheck
 npm test
 npm run test:integration
-# Той самий тест із завантаженням пакета з GitHub у чистий cache:
+# Run the same integration test with a GitHub package and a fresh cache:
 OPENCODE_TEST_PLUGIN=github:VasyaYovbak/opencode-external-tools#v0.1.1 npm run test:integration
 ```
 
-Остання команда потребує встановленого `opencode` v2.0.22. Вона запускає окремий
-сервер з ізольованими config/data/db у `/tmp/opencode`, локальну тестову модель
-та перевіряє реальний цикл: валідація аргументів → tool → SSE + pending → HTTP
-resolve → продовження моделі. Також перевіряються дві сесії з однаковим іменем
-і різними схемами, відмова для відповіді іншій сесії та повторної відповіді.
-Платні API, основний OpenCode service та його налаштування не використовуються.
+The integration tests require an installed `opencode` v2.0.22. They start a
+separate server with isolated configuration, data, and database under
+`/tmp/opencode`, plus a local fake model. They exercise the real flow: argument
+validation → tool call → SSE and pending → HTTP resolution → model continuation.
+They also check two sessions with the same tool name and different schemas, and
+reject duplicate and wrong-session responses. No paid APIs or changes to your
+main OpenCode service or configuration are involved.
 
-## Межі та безпека
+## Limits and security
 
-- Це міст для **довірених клієнтів одного OpenCode service**, не multi-tenant ACL.
-  Клієнт з доступом до service API може керувати зовнішніми tools його сесій.
-  Не виставляй сервер без автентифікації; не логуй секрети в аргументах.
-- Реєстрація tools означає згоду на передачу їх аргументів зовнішньому виконавцю.
-  Плагін не запускає shell чи довільний код з опису: усе виконує твій клієнт.
-- `options.permission` використовує публічне ім'я тула для штатного приховування
-  повністю заборонених tools. **Плагін не створює permission-запити `ask`**;
-  resource-specific перевірки та підтвердження небезпечних операцій повинен
-  виконувати зовнішній executor перед побічними ефектами.
-- Стан у пам'яті: після перезапуску/reload потрібно повторно зареєструвати набори;
-  завершення старих викликів після перезапуску не підтримується.
-- Не exactly-once delivery: для платежів, публікації тощо зберігай idempotency key
-  `callID` у зовнішній системі. Таймаут OpenCode не зупиняє зовнішню операцію.
-- Ліміти: 128 зареєстрованих сесій на location, 64 tools/сесію, 256 pending-викликів.
-  Викликай `unregister`, коли сесія більше не потребує tools.
-- Перевірений контракт API: OpenCode 2.0.22. Це не плагін для v1.
+- This bridge is for **trusted clients of one OpenCode service**, not a
+  multi-tenant access-control boundary. A client with service API access can
+  manage external tools for its sessions. Do not expose an unauthenticated
+  server or log secrets from tool arguments.
+- Registering tools authorizes forwarding their arguments to an external
+  executor. The plugin does not execute shell commands or code from tool
+  descriptions. Your application executes the tools.
+- `options.permission` uses the public tool name for OpenCode's native filtering
+  of wholly denied tools. **The plugin does not create `ask` permission
+  requests.** The external executor must enforce resource-specific checks and
+  obtain approval for dangerous operations before performing side effects.
+- State is process-local. Re-register tool sets after a server restart or plugin
+  reload. Completing calls from before a restart is not supported.
+- Delivery is not exactly-once. For payments, publishing, and similar operations,
+  store the `callID` as an idempotency key in the external system. An OpenCode
+  timeout does not stop the external operation.
+- Limits per location: 128 registered sessions, 64 tools per session, and 256
+  pending calls. Call `unregister` when a session no longer needs its tools.
+- Tested API contract: OpenCode 2.0.22. This is not a v1 plugin.
 
-Джерела: [Plugins](https://opencode.ai/v2/docs/build/plugins),
+References: [Plugins](https://opencode.ai/v2/docs/build/plugins),
 [RPC](https://opencode.ai/v2/docs/build/plugins/rpc),
 [Client](https://opencode.ai/v2/docs/build/client).
