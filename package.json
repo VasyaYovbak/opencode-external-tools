@@ -1,0 +1,33 @@
+{
+  "name": "opencode-external-tools",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Session-scoped, externally executed tools for OpenCode v2",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/VasyaYovbak/opencode-external-tools.git"
+  },
+  "files": ["index.js", "dist"],
+  "main": "./index.js",
+  "exports": {
+    ".": { "types": "./dist/index.d.ts", "import": "./index.js" },
+    "./rpc": { "types": "./dist/rpc.d.ts", "import": "./dist/rpc.js" }
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.build.json",
+    "test": "npm run build && bun test/check.ts",
+    "test:integration": "npm run build && node test/integration.mjs",
+    "typecheck": "tsc --noEmit",
+    "demo": "bun examples/client.ts"
+  },
+  "dependencies": {
+    "@opencode/plugin": "2.0.22",
+    "effect": "4.0.0-rc.112"
+  },
+  "devDependencies": {
+    "@opencode/client": "2.0.22",
+    "@types/node": "^24.0.0",
+    "typescript": "^5.9.0"
+  }
+}
