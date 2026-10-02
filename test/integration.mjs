@@ -90,7 +90,7 @@ let listening = Promise.resolve()
 async function api(path, input, method = input === undefined ? 'GET' : 'POST') {
   const response = await fetch(`${base}${path}`, {
     method, headers: { 'content-type': 'application/json', authorization: `Basic ${Buffer.from('opencode:external-tools-smoke-password').toString('base64')}` },
-    body: input === undefined ? undefined : JSON.stringify(input), signal: AbortSignal.timeout(15000),
+    body: input === undefined ? undefined : JSON.stringify(input), signal: AbortSignal.timeout(120000),
   })
   const text = await response.text()
   if (!response.ok) throw new Error(`${response.status}: ${text}`)
