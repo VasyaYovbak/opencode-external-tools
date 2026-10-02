@@ -14,7 +14,7 @@
   "$schema": "https://opencode.ai/config.json",
   "plugins": [
     {
-      "package": "github:VasyaYovbak/opencode-external-tools#v0.1.0",
+      "package": "github:VasyaYovbak/opencode-external-tools#v0.1.1",
       "options": { "timeoutMs": 120000 }
     }
   ]
@@ -23,9 +23,9 @@
 
 OpenCode сам завантажує GitHub-пакет і встановлює залежності. Готовий `dist/`
 включений у Git, тому клонувати репозиторій, ставити TypeScript чи запускати
-`npm run build` користувачу не потрібно. На першому старті дочекайся завершення
+`npm run build:plugin` користувачу не потрібно. На першому старті дочекайся завершення
 фонової установки плагіна. Тег фіксує версію; для строгого pin можна вказати
-повний commit hash замість `v0.1.0`.
+повний commit hash замість `v0.1.1`.
 
 ### Локальна розробка
 
@@ -33,14 +33,16 @@ OpenCode сам завантажує GitHub-пакет і встановлює �
 git clone https://github.com/VasyaYovbak/opencode-external-tools.git
 cd opencode-external-tools
 npm ci
-npm run build
+npm run build:plugin
 npm run typecheck
 npm test
 ```
 
 Для локальної розробки заміни `package` на абсолютний шлях до цієї папки.
-Після змін у `src/` запускай `npm run build`, потім перезавантаж конфігурацію OpenCode.
+Після змін у `src/` запускай `npm run build:plugin`, потім перезавантаж конфігурацію OpenCode.
 Перед новим релізом включай оновлений `dist/` у commit разом із вихідними файлами.
+Скрипт навмисно названо `build:plugin`, не `build`: npm інакше запускає зайву
+Git-підготовку з установкою dev-залежностей навіть для готового пакета.
 Кореневий `index.js` потрібен завантажувачу локальних директорій v2; він відкриває
 зібраний JavaScript у `dist/` без залежності від runtime-завантаження TypeScript.
 `timeoutMs` — час очікування зовнішньої відповіді,
@@ -195,7 +197,7 @@ npm run typecheck
 npm test
 npm run test:integration
 # Той самий тест із завантаженням пакета з GitHub у чистий cache:
-OPENCODE_TEST_PLUGIN=github:VasyaYovbak/opencode-external-tools#v0.1.0 npm run test:integration
+OPENCODE_TEST_PLUGIN=github:VasyaYovbak/opencode-external-tools#v0.1.1 npm run test:integration
 ```
 
 Остання команда потребує встановленого `opencode` v2.0.22. Вона запускає окремий

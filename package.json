@@ -1,6 +1,6 @@
 {
   "name": "opencode-external-tools",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "private": true,
   "type": "module",
   "description": "Session-scoped, externally executed tools for OpenCode v2",
@@ -15,9 +15,9 @@
     "./rpc": { "types": "./dist/rpc.d.ts", "import": "./dist/rpc.js" }
   },
   "scripts": {
-    "build": "tsc -p tsconfig.build.json",
-    "test": "npm run build && bun test/check.ts",
-    "test:integration": "npm run build && node test/integration.mjs",
+    "build:plugin": "tsc -p tsconfig.build.json",
+    "test": "npm run build:plugin && bun test/check.ts",
+    "test:integration": "npm run build:plugin && node test/integration.mjs",
     "typecheck": "tsc --noEmit",
     "demo": "bun examples/client.ts"
   },
