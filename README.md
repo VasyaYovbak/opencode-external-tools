@@ -149,6 +149,14 @@ regular expression evaluation can take unbounded time. Validate critical
 constraints again in your external executor; do not rely on unsupported `format`
 values or other JSON Schema extensions.
 
+**Local validation fix:** tool input is exposed to the host as a plain Standard
+Schema boundary, with the original JSON Schema for model publication. Validation
+stays inside the plugin's Effect instance: parsing a foreign raw Effect AST can
+reject valid integer arguments. Integer constraints and excess-property checks
+remain enforced; optional defaults remain schema metadata. The fake-host regression
+rejects a fractional count, then dispatches `count: 5, skip: 0` exactly once.
+This checkout includes the fix; the published `v0.1.1` tag has not been updated.
+
 Different sessions may use the same tool name with different schemas. The model
 sees your tool names, such as `get_weather`, rather than a generic wrapper.
 Internal IDs are isolated, and tools are exposed directly without Code Mode.

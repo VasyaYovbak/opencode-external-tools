@@ -140,10 +140,15 @@ export default Plugin.define({
         await ctx.tool.transform((editor) => {
             for (const [sessionID, catalog] of catalogs)
                 for (const tool of catalog) {
+                    // Host and plugin can load different Effect instances; validate locally through the portable boundary.
+                    const input = { "~standard": {
+                            ...Schema.toStandardSchemaV1(tool.input)["~standard"],
+                            jsonSchema: { input: () => tool.inputSchema, output: () => tool.inputSchema },
+                        } };
                     editor.add({
                         name: tool.id,
                         description: tool.description,
-                        input: tool.input,
+                        input,
                         options: { codemode: false, permission: tool.name },
                         execute: async (input, context) => {
                             await requireSession(context.sessionID);

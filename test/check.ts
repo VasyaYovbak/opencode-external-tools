@@ -92,9 +92,19 @@ const b = snapshot("ses_b")
 assert.deepEqual(Object.keys(a.event.tools).sort(), ["get_weather", "read"])
 assert.deepEqual(Object.keys(snapshot("ses_other").event.tools), ["read"])
 assert.notEqual(a.executor!.id, b.executor!.id)
-assert.deepEqual(Schema.decodeUnknownSync(a.executor!.input as Schema.Codec<unknown>)({ city: "Kyiv" }), { city: "Kyiv" })
-assert.throws(() => Schema.decodeUnknownSync(a.executor!.input as Schema.Codec<unknown>)({ city: 42 }))
-assert.throws(() => Schema.decodeUnknownSync(a.executor!.input as Schema.Codec<unknown>)({ city: "Kyiv", extra: true }))
+const validate = (a.executor!.input as ReturnType<typeof Schema.toStandardSchemaV1>)["~standard"].validate
+assert.deepEqual(await validate({ city: "Kyiv" }), { value: { city: "Kyiv" } })
+assert.ok((await validate({ city: 42 })).issues)
+assert.ok((await validate({ city: "Kyiv", extra: true })).issues)
+const integerSchema = { type: "object", properties: { query: { type: "string" }, count: { type: "integer", default: 5 }, skip: { type: "integer", default: 0 } }, required: ["query"], additionalProperties: false }
+const unchanged = structuredClone(integerSchema)
+await callRpc("register", { sessionID: "ses_integer", tools: [{ name: "get_weather", description: "Integer regression", inputSchema: integerSchema }] })
+const integer = (snapshot("ses_integer").executor!.input as ReturnType<typeof Schema.toStandardSchemaV1>)["~standard"].validate
+for (const value of [{ query: "x", count: 5, skip: 0 }, { query: "x" }, { query: "x", count: 5, skip: 0 }])
+  assert.deepEqual(await integer(value), { value })
+for (const value of [{ query: "x", count: 1.5 }, { query: "x", count: "5" }, { query: "x", count: NaN }, { query: "x", extra: true }])
+  assert.ok((await integer(value)).issues)
+assert.deepEqual(integerSchema, unchanged)
 
 function execute(tool: Info, sessionID: string, input: object = { city: "Kyiv" }, signal = new AbortController().signal) {
   return tool.execute(input, { sessionID, messageID: "msg_test", id: "model_call_reused", signal, progress: async () => {} } as never)

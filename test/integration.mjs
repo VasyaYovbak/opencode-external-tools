@@ -21,13 +21,14 @@ const model = createServer(async (req, res) => {
     if (tool) {
       advertised = true
       assert.equal(tool.function.parameters.properties.city.type, 'string')
+      assert.equal(tool.function.parameters.properties.count.type, 'integer')
       assert(!body.tools.some((tool) => tool.function?.name.startsWith('ext_')))
     }
     const done = body.messages.some((message) => message.role === 'tool' && String(message.content).includes('Kyiv: sunny'))
     if (body.messages.some((message) => message.role === 'tool' && String(message.content).includes('Invalid arguments')))
       validationErrorReplayed = true
     if (done) receivedResult = true
-    const argumentsText = invalidInputSent ? '{"city":"Kyiv"}' : '{"city":123}'
+    const argumentsText = invalidInputSent ? '{"city":"Kyiv","count":5,"skip":0}' : '{"city":"Kyiv","count":1.5}'
     if (tool && !done) invalidInputSent = true
     const message = tool && !done
       ? { role: 'assistant', content: null, tool_calls: [{ id: 'model_call_1', type: 'function', function: { name: 'get_weather', arguments: argumentsText } }] }
@@ -59,6 +60,7 @@ const base = `http://127.0.0.1:${port}`
 const config = {
   plugins: [{ package: plugin, options: { timeoutMs: 120000 } }],
   model: 'bridge-test/test',
+  agents: { build: { steps: 3 } },
   providers: { 'bridge-test': {
     name: 'Bridge test', env: ['BRIDGE_TEST_API_KEY'],
     package: '@opencode/ai/providers/openai-compatible',
@@ -113,7 +115,7 @@ try {
       await delay(250)
     }
   }
-  const inputSchema = { type: 'object', properties: { city: { type: 'string' } }, required: ['city'], additionalProperties: false }
+  const inputSchema = { type: 'object', properties: { city: { type: 'string' }, count: { type: 'integer', default: 5 }, skip: { type: 'integer', default: 0 } }, required: ['city'], additionalProperties: false }
   const registered = await rpc('register', { sessionID: session.id, tools: [{ name: 'get_weather', description: 'Weather', inputSchema }] })
   assert.deepEqual(registered.output.tools, ['get_weather'])
   const { data: other } = await api('/api/session', { location: { directory: root }, title: 'Isolation test' })
@@ -158,7 +160,7 @@ try {
   }
   assert(call, 'No external call; model/alias/executor integration failed')
   assert.equal(call.tool, 'get_weather')
-  assert.deepEqual(call.arguments, { city: 'Kyiv' })
+  assert.deepEqual(call.arguments, { city: 'Kyiv', count: 5, skip: 0 })
   const event = await requestedEvent
   assert.equal(event.location.directory, root)
   assert.deepEqual(event.data, call, 'SSE and pending must describe the same call')
