@@ -33,7 +33,7 @@ const reload = async () => {
 }
 const registration = { dispose: async () => {} }
 const cleanup = await plugin.setup({
-  options: { timeoutMs: 50 },
+  options: { timeoutMs: 50, codemode: false },
   location,
   session: {
     get: async ({ sessionID }: { sessionID: string }) => {

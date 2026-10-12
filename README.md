@@ -1,7 +1,7 @@
 # OpenCode External Tools
 
 **Let OpenCode use tools that live in another application, without an MCP server
-or changes to the agent backend.** Tested with OpenCode **v2.0.22**.
+or changes to the agent backend.** Tested with OpenCode **v2.0.27**.
 
 ## Why this plugin exists
 
@@ -13,7 +13,8 @@ connect to that environment and start using them.
 
 This plugin bridges that gap. Your application selects the tools available for a
 request or session and sends their **names, descriptions, and input schemas** to
-OpenCode. The agent sees ordinary named tools and can call them. Your application
+OpenCode. The agent discovers individual named tools through OpenCode's native
+Code Mode `search` and calls them through `execute`. Your application
 receives each call, runs the tool in its existing environment, and returns the
 result so the agent can continue.
 
@@ -28,12 +29,12 @@ already knows how to execute its own tools.
 
 ```text
 Your application selects and registers tool definitions
-    → OpenCode presents the named tools to the model
+    → OpenCode includes the session's named tools in its native Code Mode catalog
     → The model calls a tool
     → The plugin emits a requested event and waits
     → Your application executes the tool externally
     → Your application returns the result through HTTP RPC
-    → OpenCode passes the result to the model and continues
+    → OpenCode passes the text result to the model and continues
 ```
 
 **Scope:** registration is session-scoped. To select tools for a particular
@@ -73,6 +74,12 @@ for a strict pin, use a full commit hash instead of `v0.1.1`.
 
 `timeoutMs` is the maximum time to wait for an external response. It defaults to
 120 seconds and accepts integers from 1 to 3600000 milliseconds.
+
+`codemode` defaults to `true`: external tools use native `search` / `execute`,
+without publishing every input schema as a direct model-facing tool. Set
+`"codemode": false` in plugin options for the previous direct-tool behavior.
+**Code Mode support is in this checkout; the published `v0.1.1` tag does not yet
+include it.** Use a local plugin path to test this change.
 
 ### Local development
 
@@ -157,11 +164,24 @@ remain enforced; optional defaults remain schema metadata. The fake-host regress
 rejects a fractional count, then dispatches `count: 5, skip: 0` exactly once.
 This checkout includes the fix; the published `v0.1.1` tag has not been updated.
 
-Different sessions may use the same tool name with different schemas. The model
-sees your tool names, such as `get_weather`, rather than a generic wrapper.
-Internal IDs are isolated, and tools are exposed directly without Code Mode.
+Different sessions may use the same tool name with different schemas. Each tool
+is individually searchable/callable, not hidden behind a generic bridge tool.
+Native Code Mode paths use `tools.external.s_<session-hash>.<tool-name>`;
+the hash is stable for that session. Inside `execute`, discover the exact paths:
+
+```js
+return search({ namespace: "external", query: "get_weather" })
+```
+
+Use the returned `path` verbatim in a subsequent `execute` call. The plugin
+registers tools before model selection and uses private native permission rules
+to filter out other sessions **before** OpenCode builds the Code Mode catalog.
+Prompt admission strips grants inherited from a parent session. Executors also
+check the current session, registration, and public-name whole-tool deny policy.
+With `codemode: false`, the model sees direct names such as `get_weather` instead.
 Duplicate names within a set and collisions with native tools, including `read`
-and `execute`, are not allowed. Child sessions do not inherit external tool sets.
+and `execute`, are not allowed. The `external_tools_session_` prefix is reserved.
+Child sessions do not inherit external tool sets.
 
 ### 2. Receive a call
 
@@ -265,17 +285,24 @@ service.
 npm run typecheck
 npm test
 npm run test:integration
+# Test the default native Code Mode path with the same isolated real backend:
+OPENCODE_TEST_CODEMODE=true npm run test:integration
 # Run the same integration test with a GitHub package and a fresh cache:
 OPENCODE_TEST_PLUGIN=github:VasyaYovbak/opencode-external-tools#v0.1.1 npm run test:integration
 ```
 
-The integration tests require an installed `opencode` v2.0.22. They start a
+The integration tests were run with an installed `opencode` v2.0.27. They start a
 separate server with isolated configuration, data, and database under
 `/tmp/opencode`, plus a local fake model. They exercise the real flow: argument
 validation → tool call → SSE and pending → HTTP resolution → model continuation.
 They also check two sessions with the same tool name and different schemas, and
 reject duplicate and wrong-session responses. No paid APIs or changes to your
 main OpenCode service or configuration are involved.
+The native-mode run also checks individual tool discovery, execution using the
+returned path, absence of direct full schemas, public-name denies, and isolation
+from another session and inherited parent permissions. It checks that external
+UI embeds survive the outer native `execute` result, live event, and transcript
+without leaking HTML into the model context.
 
 ## Limits and security
 
@@ -286,10 +313,24 @@ main OpenCode service or configuration are involved.
 - Registering tools authorizes forwarding their arguments to an external
   executor. The plugin does not execute shell commands or code from tool
   descriptions. Your application executes the tools.
-- `options.permission` uses the public tool name for OpenCode's native filtering
-  of wholly denied tools. **The plugin does not create `ask` permission
+- Public-name permission rules still filter wholly denied tools. Native mode
+  reserves `external_tools_session_*` actions and manages those entries in
+  `session.permissions`, retaining unrelated rules. Serialize explicit permission
+  edits with registration and prompt admission: OpenCode replaces the full
+  ruleset and does not expose a compare-and-swap/partial update here.
+  **The plugin does not create `ask` permission
   requests.** The external executor must enforce resource-specific checks and
   obtain approval for dangerous operations before performing side effects.
+- Catalog isolation covers ordinary `session.prompt` execution. Auxiliary
+  `session.generate` / compaction do not run prompt admission and are not a
+  supported entrypoint for external tools. Policies refreshed after a snapshot
+  affect later catalogs; execution rechecks whole-tool denies before dispatch.
+- Native Code Mode drops child tool metadata by default. This plugin forwards
+  **only HTML `embeds`** from its own completed external calls to the outer
+  `execute` result's metadata. UI integrations rendering tool embeds from
+  metadata (such as the Open WebUI Pipe) can display them at the `execute` tool
+  block; HTML is not added to model-visible text. Other child metadata (for
+  example `title` and `externalCallID`) is not propagated to the outer result.
 - State is process-local. Re-register tool sets after a server restart or plugin
   reload. Completing calls from before a restart is not supported.
 - Delivery is not exactly-once. For payments, publishing, and similar operations,
@@ -297,7 +338,7 @@ main OpenCode service or configuration are involved.
   timeout does not stop the external operation.
 - Limits per location: 128 registered sessions, 64 tools per session, and 256
   pending calls. Call `unregister` when a session no longer needs its tools.
-- Tested API contract: OpenCode 2.0.22. This is not a v1 plugin.
+- Tested API contract: OpenCode 2.0.27. This is not a v1 plugin.
 
 References: [Plugins](https://opencode.ai/v2/docs/build/plugins),
 [RPC](https://opencode.ai/v2/docs/build/plugins/rpc),

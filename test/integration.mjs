@@ -5,19 +5,43 @@ import { mkdtemp, mkdir, rm, readFile, writeFile } from 'node:fs/promises'
 import { once } from 'node:events'
 import { setTimeout as delay } from 'node:timers/promises'
 import { fileURLToPath } from 'node:url'
+import { createHash, randomUUID } from 'node:crypto'
 
 const root = await mkdtemp('/tmp/opencode/external-tools-smoke-')
 const plugin = process.env.OPENCODE_TEST_PLUGIN ?? fileURLToPath(new URL('../', import.meta.url))
+const codemode = process.env.OPENCODE_TEST_CODEMODE === 'true'
 let receivedResult = false
 let advertised = false
 let invalidInputSent = false
 let validationErrorReplayed = false
+let nativeSearch
+let emptySearch
+let nativePath
+let nativeResult = false
+const uiEmbeds = ['<!doctype html><html><body>TOOL-EMBED-ONLY</body></html>']
+let uiMetadataLeaked = false
+let uiSuccessMetadata = false
+let uiReport
 const model = createServer(async (req, res) => {
   try {
     const chunks = []
     for await (const chunk of req) chunks.push(chunk)
     const body = JSON.parse(Buffer.concat(chunks).toString())
+    uiMetadataLeaked ||= JSON.stringify(body).includes('TOOL-EMBED-ONLY')
+    assert(!JSON.stringify(body).includes('PRIVATE_OTHER_SCHEMA'), 'Another session\'s schema leaked into model context')
+    const recent = body.messages.slice(body.messages.findLastIndex(message => message.role === 'user'))
+    const nativePrompt = String(recent[0]?.content)
+    const native = nativePrompt.includes('NATIVE_SEARCH') || nativePrompt.includes('NATIVE_CALL') || nativePrompt.includes('NATIVE_STALE') || nativePrompt.includes('EMPTY_SEARCH')
+    const nativeOutput = recent.find(message => message.role === 'tool')
+    if (nativeOutput) {
+      if (nativePrompt.includes('NATIVE_SEARCH')) nativeSearch = JSON.parse(nativeOutput.content)
+      if (nativePrompt.includes('EMPTY_SEARCH')) emptySearch = JSON.parse(nativeOutput.content)
+      if (nativePrompt.includes('NATIVE_CALL')) nativeResult = String(nativeOutput.content).includes('Native Kyiv: sunny')
+    }
+    if (nativePrompt.includes('NATIVE_STALE') && !nativeOutput)
+      await rpc('unregister', { sessionID: req.headers['x-opencode-session-id'] })
     const tool = body.tools?.find((tool) => tool.function?.name === 'get_weather')
+    if (codemode) assert(!tool, 'Code Mode must not publish external tools\' full schemas directly')
     if (tool) {
       advertised = true
       assert.equal(tool.function.parameters.properties.city.type, 'string')
@@ -30,10 +54,12 @@ const model = createServer(async (req, res) => {
     if (done) receivedResult = true
     const argumentsText = invalidInputSent ? '{"city":"Kyiv","count":5,"skip":0}' : '{"city":"Kyiv","count":1.5}'
     if (tool && !done) invalidInputSent = true
-    const message = tool && !done
+    const message = native && !nativeOutput
+      ? { role: 'assistant', content: null, tool_calls: [{ id: 'native_call', type: 'function', function: { name: 'execute', arguments: JSON.stringify({ code: nativePrompt.includes('NATIVE_CALL') || nativePrompt.includes('NATIVE_STALE') ? `return await ${nativePath}({city:"Kyiv",count:5,skip:0})` : 'return search({namespace:"external",limit:100})' }) } }] }
+      : native ? { role: 'assistant', content: 'Native check completed.' } : tool && !done
       ? { role: 'assistant', content: null, tool_calls: [{ id: 'model_call_1', type: 'function', function: { name: 'get_weather', arguments: argumentsText } }] }
       : { role: 'assistant', content: 'External tool completed.' }
-    const finish = tool && !done ? 'tool_calls' : 'stop'
+    const finish = message.tool_calls ? 'tool_calls' : 'stop'
     const common = { id: 'chatcmpl-test', created: Math.floor(Date.now()/1000), model: 'test' }
     if (body.stream) {
       res.writeHead(200, { 'content-type': 'text/event-stream' })
@@ -58,8 +84,9 @@ const port = reservation.address().port
 await new Promise((resolve) => reservation.close(resolve))
 const base = `http://127.0.0.1:${port}`
 const config = {
-  plugins: [{ package: plugin, options: { timeoutMs: 120000 } }],
+  plugins: [{ package: plugin, options: { timeoutMs: 120000, ...(codemode ? {} : { codemode: false }) } }],
   model: 'bridge-test/test',
+  compaction: {auto:false, keep:{tokens:0}},
   agents: { build: { steps: 3 } },
   providers: { 'bridge-test': {
     name: 'Bridge test', env: ['BRIDGE_TEST_API_KEY'],
@@ -116,10 +143,11 @@ try {
     }
   }
   const inputSchema = { type: 'object', properties: { city: { type: 'string' }, count: { type: 'integer', default: 5 }, skip: { type: 'integer', default: 0 } }, required: ['city'], additionalProperties: false }
-  const registered = await rpc('register', { sessionID: session.id, tools: [{ name: 'get_weather', description: 'Weather', inputSchema }] })
-  assert.deepEqual(registered.output.tools, ['get_weather'])
+  await api(`/api/session/${session.id}`, { permissions: [{ action: 'weather_hidden', resource: '*', effect: 'deny' }] }, 'PATCH')
+  const registered = await rpc('register', { sessionID: session.id, tools: [{ name: 'get_weather', description: 'Weather', inputSchema }, { name: 'weather_hidden', description: 'Denied weather', inputSchema }] })
+  assert.deepEqual(registered.output.tools, ['get_weather', 'weather_hidden'])
   const { data: other } = await api('/api/session', { location: { directory: root }, title: 'Isolation test' })
-  await rpc('register', { sessionID: other.id, tools: [{ name: 'get_weather', description: 'Different schema', inputSchema: {
+  await rpc('register', { sessionID: other.id, tools: [{ name: 'get_weather', description: 'PRIVATE_OTHER_SCHEMA', inputSchema: {
     type: 'object', properties: { id: { type: 'number' } }, required: ['id'],
   } }] })
   let requestedCount = 0
@@ -143,6 +171,7 @@ try {
         const data = frame.split('\n').filter((line) => line.startsWith('data:')).map((line) => line.slice(5).trimStart()).join('\n')
         if (!data) continue
         const event = JSON.parse(data)
+        if (event.type === 'session.tool.success' && event.data.sessionID === session.id && event.data.metadata?.embeds?.[0] === uiEmbeds[0]) uiSuccessMetadata = true
         if (event.type === 'rpc.external_tools.requested' && event.data.sessionID === session.id) {
           requestedCount++
           acceptEvent(event)
@@ -151,6 +180,7 @@ try {
     }
     rejectEvent(new Error('SSE stream ended before the requested event'))
   })().catch((error) => { if (!eventsController.signal.aborted) rejectEvent(error) })
+  if (!codemode) {
   await api(`/api/session/${session.id}/prompt`, { text: 'Call get_weather for Kyiv.' })
   let call
   for (let attempt = 0; attempt < 100; attempt++) {
@@ -166,7 +196,7 @@ try {
   assert.deepEqual(event.data, call, 'SSE and pending must describe the same call')
   assert.deepEqual((await rpc('pending', { sessionID: other.id })).output.calls, [])
   await assert.rejects(rpc('resolve', { sessionID: other.id, callID: call.callID, result: { output: 'wrong session' } }), /not_found/)
-  await rpc('resolve', { sessionID: session.id, callID: call.callID, result: { output: 'Kyiv: sunny', metadata: { source: 'smoke' } } })
+  await rpc('resolve', { sessionID: session.id, callID: call.callID, result: { output: 'Kyiv: sunny', metadata: { source: 'smoke', embeds: uiEmbeds } } })
   await assert.rejects(rpc('resolve', { sessionID: session.id, callID: call.callID, result: { output: 'duplicate' } }), /not_found/)
   await api(`/api/experimental/session/${session.id}/wait`, {})
   assert(advertised, 'Model did not see the public tool name')
@@ -174,9 +204,67 @@ try {
   assert(validationErrorReplayed, 'Invalid tool arguments must be rejected before external dispatch')
   assert.equal(requestedCount, 1, 'Only the valid tool input may reach the external executor')
   assert.deepEqual((await rpc('pending', { sessionID: session.id })).output.calls, [])
+  const transcript = (await api(`/api/session/${session.id}/message?limit=100&order=asc`)).data
+  const uiTool = transcript.flatMap(message => message.content ?? []).find(content => content.type === 'tool' && content.state.metadata?.embeds)
+  assert.deepEqual(uiTool?.state.metadata.embeds, uiEmbeds, 'Tool UI metadata was not durably persisted')
+  assert(uiSuccessMetadata, 'Live success event lost Tool UI metadata')
+  assert(!uiMetadataLeaked, 'UI metadata was included in provider/model context')
+  const {data: importedInfo} = await api('/api/session', {location:{directory:root}, title:'UI metadata import test'})
+  await api(`/api/session/${importedInfo.id}`, undefined, 'DELETE')
+  await api('/api/experimental/session/import', {info:importedInfo, location:{directory:root}, messages:transcript.map(message => ({...message, id:'msg_'+crypto.randomUUID().replaceAll('-','')}))})
+  const imported = (await api(`/api/session/${importedInfo.id}/message?limit=100&order=asc`)).data
+  assert.deepEqual(imported.flatMap(message => message.content ?? []).find(content => content.type === 'tool' && content.state.metadata?.embeds)?.state, uiTool.state, 'Tool UI/provider state changed during native branch import')
+  console.log('OK: Tool UI metadata survives SSE, durable transcript and native import; provider receives context only, not HTML')
+  uiReport = {
+    suite:'tool-embeds-backend', run_id:randomUUID(), backend_version:(await api('/api/info')).version,
+    scope:'real isolated backend/plugin + fake provider; no Pipe/WebUI/browser runtime', status:'PASS', cost_usd:0,
+    plugin_source_hash:createHash('sha256').update(await readFile(new URL('../src/index.ts',import.meta.url))).digest('hex'),
+    checks:['success SSE includes HTML metadata','native transcript retains metadata','native import retains complete tool state','provider receives output only, not UI HTML','wrong-session/duplicate resolution rejected'],
+  }
+  }
+  if (codemode) {
+  await api(`/api/session/${session.id}/prompt`, { text: 'NATIVE_SEARCH' })
+  await api(`/api/experimental/session/${session.id}/wait`, {})
+  assert.equal(nativeSearch?.items.length, 1, 'Native search must expose only this session\'s non-denied external tool')
+  assert.equal(nativeSearch.items[0].description, 'Weather')
+  assert(nativeSearch.items[0].signature.includes('city: string'), 'Native search lost this session\'s schema')
+  nativePath = nativeSearch.items[0].path
+  await api(`/api/session/${session.id}/prompt`, { text: 'NATIVE_CALL' })
+  let nativeCall
+  for (let attempt = 0; attempt < 100; attempt++) {
+    nativeCall = (await rpc('pending', { sessionID: session.id })).output.calls[0]
+    if (nativeCall) break
+    await delay(100)
+  }
+  assert.equal(nativeCall?.tool, 'get_weather', 'Native execute did not dispatch the discovered tool')
+  assert.deepEqual(nativeCall.arguments, { city: 'Kyiv', count: 5, skip: 0 })
+  await rpc('resolve', { sessionID: session.id, callID: nativeCall.callID, result: { output: 'Native Kyiv: sunny', metadata: { embeds: uiEmbeds } } })
+  await api(`/api/experimental/session/${session.id}/wait`, {})
+  assert(nativeResult, 'Native execute lost the external result')
+  const nativeTranscript = (await api(`/api/session/${session.id}/message?limit=100&order=asc`)).data
+  const nativeTool = nativeTranscript.flatMap(message => message.content ?? []).find(content => content.type === 'tool' && content.name === 'execute' && content.state.metadata?.embeds)
+  assert.deepEqual(nativeTool?.state.metadata.embeds, uiEmbeds, 'Native execute dropped child UI embeds before durable projection')
+  assert(uiSuccessMetadata, 'Native execute success event lost child UI embeds')
+  assert(!uiMetadataLeaked, 'Child UI HTML leaked to model context')
+  const scopedSession = (await api(`/api/session/${session.id}`)).data
+  assert(scopedSession.permissions.some(rule => rule.action === 'weather_hidden' && rule.effect === 'deny'), 'Registration overwrote user permissions')
+  const { data: empty } = await api('/api/session', { location: { directory: root }, parentID: session.id, permissions: scopedSession.permissions, title: 'Inherited permission isolation' })
+  await api(`/api/session/${empty.id}/prompt`, { text: 'EMPTY_SEARCH' })
+  await api(`/api/experimental/session/${empty.id}/wait`, {})
+  assert.deepEqual(emptySearch?.items, [], 'A child/unregistered session inherited external tools in native search')
+  await api(`/api/session/${session.id}/prompt`, { text: 'NATIVE_STALE' })
+  await api(`/api/experimental/session/${session.id}/wait`, {})
+  assert.equal(requestedCount, 1, 'Unregister during a native model request dispatched an external call')
+  assert.deepEqual((await rpc('pending', { sessionID: session.id })).output.calls, [])
+  console.log('OK: native search → individual session-scoped tool → native execute → external resolution; public denies and inherited-session isolation preserved')
+  }
   await rpc('unregister', { sessionID: session.id })
   await rpc('unregister', { sessionID: other.id })
-  console.log('OK: real OpenCode 2.0.22 → schema validation → session-isolated named tool → SSE/pending → HTTP resolve → model continuation; duplicate/wrong-session responses rejected (local fake provider, no paid API)')
+  await api(`/api/session/${session.id}/compact`, {})
+  await api(`/api/experimental/session/${session.id}/wait`, {})
+  assert(!uiMetadataLeaked, 'Manual compaction included UI HTML in provider context')
+  uiReport?.checks.push('manual compaction keeps UI metadata out of provider context')
+  console.log(`OK: real OpenCode ${(await api('/api/info')).version}, ${codemode ? 'native Code Mode' : 'direct tools'}; isolated local fake provider, no paid API`)
 } catch (error) {
   console.error(logs)
   console.error(await readFile(`${root}/data/opencode/log/opencode.log`, 'utf8').catch(() => 'No server log'))
@@ -192,4 +280,8 @@ finally {
   model.closeAllConnections()
   await new Promise((resolve) => model.close(resolve))
   await rm(root, { recursive: true, force: true })
+}
+if (uiReport && process.env.OPENCODE_UI_REPORT) {
+  await writeFile(process.env.OPENCODE_UI_REPORT,JSON.stringify({...uiReport,cleanup:'owned backend/provider stopped; disposable config/database/workspace removed'},null,2)+'\n')
+  console.log('Report:',process.env.OPENCODE_UI_REPORT)
 }
