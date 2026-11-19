@@ -170,8 +170,11 @@ This checkout includes the fix; the published `v0.1.1` tag has not been updated.
 
 Different sessions may use the same tool name with different schemas. Each tool
 is individually searchable/callable, not hidden behind a generic bridge tool.
-Native Code Mode paths use `tools.external.s_<session-hash>.<tool-name>`;
-the hash is stable for that session. Inside `execute`, discover the exact paths:
+Native Code Mode paths use `tools.external.c_<catalog-hash>.<tool-name>`.
+The 12-hex hash covers tool names, descriptions, and schemas, so identical
+catalogs keep the same paths across sessions for prompt caching. Access and
+execution remain session-scoped. If a path isn't already listed in the model's
+catalog, discover it inside `execute`:
 
 ```js
 return search({ namespace: "external", query: "get_weather" })

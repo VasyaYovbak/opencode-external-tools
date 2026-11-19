@@ -12,7 +12,7 @@ class BridgeError extends Error {
 }
 
 type RpcContext = RpcCallContext<typeof ExternalTools.methods.register>
-type RegisteredTool = ToolDefinition & { id: string; namespace: string; permission: string; input: Schema.Codec<unknown> }
+type RegisteredTool = ToolDefinition & { id: string; namespace: string; digest: string; permission: string; input: Schema.Codec<unknown> }
 interface Pending {
   call: Call
   settle(result?: Result, error?: Error): void
@@ -130,8 +130,17 @@ export default Plugin.define({
         const native = new Set((await ctx.tool.list()).filter((tool) => !tool.id.startsWith(prefix) && !tool.options?.permission?.startsWith(permissionPrefix)).map((tool) => tool.id))
         const names = new Set<string>()
         const generation = crypto.randomUUID().replaceAll("-", "")
-        const namespace = `external.s_${createHash("sha256").update(sessionID).digest("hex").slice(0, 32)}`
-        const registered = tools.map((tool, index): RegisteredTool => {
+        // Canonicalize JSON object keys for both hashing and the model-visible schema. Preserve array order.
+        const definitions: ToolDefinition[] = codemode ? JSON.parse(JSON.stringify(tools, (_, value) =>
+          value && typeof value === "object" && !Array.isArray(value)
+            ? Object.fromEntries(Object.keys(value).sort().map((key) => [key, value[key]])) : value)) : tools
+        const digest = codemode ? createHash("sha256").update(JSON.stringify(definitions.toSorted((a, b) =>
+          a.name < b.name ? -1 : a.name > b.name ? 1 : 0))).digest("hex") : ""
+        const namespace = `external.c_${digest.slice(0, 12)}`
+        // baza: check active catalogs only; persisted collision tracking would require a durable registry.
+        if (codemode && [...catalogs.values()].some(([tool]) => tool.namespace === namespace && tool.digest !== digest))
+          throw new BridgeError("conflict", "External tool catalog hash collision")
+        const registered = definitions.map((tool, index): RegisteredTool => {
           if (!/^[A-Za-z_][A-Za-z0-9_-]{0,63}$/.test(tool.name) || tool.name.startsWith(permissionPrefix) || tool.name === "execute" || native.has(tool.name) || native.has(`${namespace.replaceAll(".", "_")}_${tool.name}`))
             throw new BridgeError("invalid_request", `Reserved or invalid tool name: ${tool.name}`)
           if (names.has(tool.name)) throw new BridgeError("invalid_request", `Duplicate tool name: ${tool.name}`)
@@ -145,7 +154,7 @@ export default Plugin.define({
               : JsonSchema.fromSchemaDraft2020_12(schema)
             const codec = Schema.make<Schema.Codec<unknown>>(SchemaRepresentation.fromJsonSchemaDocument(document).ast)
               .annotate({ parseOptions: { onExcessProperty: "error" } })
-            return { ...tool, inputSchema: schema, input: codec, id: `${prefix}${generation}_${index}`, namespace, permission: `${permissionPrefix}${namespace.slice("external.".length)}_${tool.name}` }
+            return { ...tool, inputSchema: schema, input: codec, id: `${prefix}${generation}_${index}`, namespace, digest, permission: `${permissionPrefix}${namespace.slice("external.".length)}_${tool.name}` }
           } catch (error) {
             throw new BridgeError("invalid_request", `Invalid schema for ${tool.name}: ${error instanceof Error ? error.message : String(error)}`)
           }
@@ -190,7 +199,11 @@ export default Plugin.define({
 
     await ctx.tool.transform((editor) => {
       if (codemode) editor.namespace({ name: "external", description: "External tools registered for this session" })
-      for (const [sessionID, catalog] of catalogs) for (const tool of catalog) {
+      const snapshot = new Map(catalogs)
+      const added = new Set<string>()
+      for (const catalog of snapshot.values()) for (const tool of catalog) {
+        if (codemode && added.has(tool.permission)) continue
+        added.add(tool.permission)
         // Host and plugin can load different Effect instances; validate locally through the portable boundary.
         const input = { "~standard": {
           ...Schema.toStandardSchemaV1(tool.input)["~standard"],
@@ -204,11 +217,14 @@ export default Plugin.define({
             ? { namespace: tool.namespace, codemode: true, pinned, permission: tool.permission }
             : { codemode: false, permission: tool.name },
           execute: async (input, context) => {
-            await requireSession(context.sessionID)
-            const denied = codemode && context.sessionID === sessionID
-              ? await update(() => scopePermissions(context.sessionID, context.agent)) : undefined
+            const { sessionID } = context
+            await requireSession(sessionID)
+            const registered = snapshot.get(sessionID)
+            if (!(codemode ? registered?.[0]?.digest === tool.digest : registered === catalog))
+              throw new Error("External tool is not registered for this session/request")
+            const denied = codemode ? await update(() => scopePermissions(sessionID, context.agent)) : undefined
             // Recheck after the policy await: registration may have changed while this invocation waited.
-            if (closed || context.sessionID !== sessionID || catalogs.get(sessionID) !== catalog)
+            if (closed || catalogs.get(sessionID) !== registered)
               throw new Error("External tool is not registered for this session/request")
             if (denied?.has(tool.permission))
               throw new Error(`External tool is denied: ${tool.name}`)

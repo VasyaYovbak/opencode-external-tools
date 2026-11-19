@@ -19,7 +19,8 @@ let validationErrorReplayed = false
 let nativeSearch
 let emptySearch
 let nativePath
-let nativeResult = false
+const nativeResults = new Map()
+const nativePrefixes = new Map()
 const uiEmbeds = ['<!doctype html><html><body>TOOL-EMBED-ONLY</body></html>']
 let uiMetadataLeaked = false
 let uiSuccessMetadata = false
@@ -35,6 +36,9 @@ const model = createServer(async (req, res) => {
     const nativePrompt = String(recent[0]?.content)
     const native = nativePrompt.includes('NATIVE_SEARCH') || nativePrompt.includes('NATIVE_CALL') || nativePrompt.includes('NATIVE_STALE') || nativePrompt.includes('EMPTY_SEARCH')
     const nativeOutput = recent.find(message => message.role === 'tool')
+    const sessionID = req.headers['x-opencode-session-id']
+    if (nativePrompt === 'NATIVE_SEARCH' && !nativeOutput)
+      nativePrefixes.set(sessionID, { messages: body.messages.slice(0, -1), tools: body.tools })
     if (nativePrompt === 'PINNED_BUDGET_PROBE' && pinnedInFirstRequest === undefined) {
       const context = body.messages.filter(m => m.role === 'system' || m.role === 'developer').map(m => JSON.stringify(m.content)).join('\n')
       pinnedInFirstRequest = context.includes('wide_catalog_probe') && context.includes('field_499: string')
@@ -42,7 +46,7 @@ const model = createServer(async (req, res) => {
     if (nativeOutput) {
       if (nativePrompt.includes('NATIVE_SEARCH')) nativeSearch = JSON.parse(nativeOutput.content)
       if (nativePrompt.includes('EMPTY_SEARCH')) emptySearch = JSON.parse(nativeOutput.content)
-      if (nativePrompt.includes('NATIVE_CALL')) nativeResult = String(nativeOutput.content).includes('Native Kyiv: sunny')
+      if (nativePrompt.includes('NATIVE_CALL')) nativeResults.set(sessionID, String(nativeOutput.content))
     }
     if (nativePrompt.includes('NATIVE_STALE') && !nativeOutput)
       await rpc('unregister', { sessionID: req.headers['x-opencode-session-id'] })
@@ -242,18 +246,32 @@ try {
   assert.equal(nativeSearch.items[0].description, 'Weather')
   assert(nativeSearch.items[0].signature.includes('city: string'), 'Native search lost this session\'s schema')
   nativePath = nativeSearch.items[0].path
-  await api(`/api/session/${session.id}/prompt`, { text: 'NATIVE_CALL' })
-  let nativeCall
+  assert.match(nativePath, /^tools\.external\.c_[0-9a-f]{12}\.get_weather$/)
+  const { data: twin } = await api('/api/session', { location: { directory: root }, title: 'Same catalog, different session' })
+  await api(`/api/session/${twin.id}`, { permissions: [{ action: 'weather_hidden', resource: '*', effect: 'deny' }] }, 'PATCH')
+  const reordered = { ...inputSchema, properties: Object.fromEntries(Object.entries(inputSchema.properties).reverse()) }
+  await rpc('register', { sessionID: twin.id, tools: [{ name: 'weather_hidden', description: 'Denied weather', inputSchema: reordered }, { name: 'get_weather', description: 'Weather', inputSchema: reordered }] })
+  await api(`/api/session/${twin.id}/prompt`, { text: 'NATIVE_SEARCH' })
+  await api(`/api/experimental/session/${twin.id}/wait`, {})
+  assert.deepEqual(nativeSearch.items.map(item => item.path), [nativePath])
+  assert(nativePrefixes.has(session.id) && nativePrefixes.has(twin.id))
+  assert.deepEqual(nativePrefixes.get(twin.id), nativePrefixes.get(session.id), 'Same catalog changed the provider prefix')
+  const ids = [session.id, twin.id]
+  await Promise.all(ids.map(id => api(`/api/session/${id}/prompt`, { text: 'NATIVE_CALL' })))
+  let calls = []
   for (let attempt = 0; attempt < 100; attempt++) {
-    nativeCall = (await rpc('pending', { sessionID: session.id })).output.calls[0]
-    if (nativeCall) break
+    calls = await Promise.all(ids.map(async sessionID => (await rpc('pending', { sessionID })).output.calls[0]))
+    if (calls.every(Boolean)) break
     await delay(100)
   }
-  assert.equal(nativeCall?.tool, 'get_weather', 'Native execute did not dispatch the discovered tool')
-  assert.deepEqual(nativeCall.arguments, { city: 'Kyiv', count: 5, skip: 0 })
-  await rpc('resolve', { sessionID: session.id, callID: nativeCall.callID, result: { output: 'Native Kyiv: sunny', metadata: { embeds: uiEmbeds } } })
-  await api(`/api/experimental/session/${session.id}/wait`, {})
-  assert(nativeResult, 'Native execute lost the external result')
+  assert.deepEqual(calls.map(call => [call?.sessionID, call?.tool, call?.arguments]),
+    ids.map(id => [id, 'get_weather', { city: 'Kyiv', count: 5, skip: 0 }]))
+  await assert.rejects(rpc('resolve', { sessionID: twin.id, callID: calls[0].callID, result: { output: 'wrong session' } }), /not_found/)
+  for (const [i, call] of calls.entries())
+    await rpc('resolve', { sessionID: call.sessionID, callID: call.callID, result: { output: `Native result ${i}`, metadata: { embeds: uiEmbeds } } })
+  await Promise.all(ids.map(id => api(`/api/experimental/session/${id}/wait`, {})))
+  for (const [i, id] of ids.entries()) assert(nativeResults.get(id)?.includes(`Native result ${i}`))
+  console.log('OK: identical Code Mode prefixes and paths, isolated calls across concurrent sessions')
   const nativeTranscript = (await api(`/api/session/${session.id}/message?limit=100&order=asc`)).data
   const nativeTool = nativeTranscript.flatMap(message => message.content ?? []).find(content => content.type === 'tool' && content.name === 'execute' && content.state.metadata?.embeds)
   assert.deepEqual(nativeTool?.state.metadata.embeds, uiEmbeds, 'Native execute dropped child UI embeds before durable projection')
@@ -269,6 +287,7 @@ try {
   await api(`/api/experimental/session/${session.id}/wait`, {})
   assert.equal(requestedCount, 1, 'Unregister during a native model request dispatched an external call')
   assert.deepEqual((await rpc('pending', { sessionID: session.id })).output.calls, [])
+  await rpc('unregister', { sessionID: twin.id })
   console.log('OK: native search → individual session-scoped tool → native execute → external resolution; public denies and inherited-session isolation preserved')
   }
   await rpc('unregister', { sessionID: session.id })
