@@ -15,6 +15,10 @@ export interface Call {
 }
 export interface Result {
     output: string;
+    image?: {
+        mime: string;
+        data: string;
+    };
     title?: string;
     metadata?: Record<string, unknown>;
 }
@@ -221,6 +225,21 @@ export declare const ExternalTools: {
                             readonly metadata: {
                                 readonly type: "object";
                                 readonly additionalProperties: true;
+                            };
+                            readonly image: {
+                                readonly type: "object";
+                                readonly properties: {
+                                    readonly mime: {
+                                        readonly enum: readonly ["image/png", "image/jpeg", "image/gif", "image/webp"];
+                                    };
+                                    readonly data: {
+                                        readonly type: "string";
+                                        readonly minLength: 4;
+                                        readonly maxLength: 2796204;
+                                    };
+                                };
+                                readonly required: readonly ["mime", "data"];
+                                readonly additionalProperties: false;
                             };
                         };
                         readonly required: readonly ["output"];

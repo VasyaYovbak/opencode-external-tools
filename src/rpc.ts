@@ -19,6 +19,7 @@ export interface Call {
 
 export interface Result {
   output: string
+  image?: { mime: string; data: string }
   title?: string
   metadata?: Record<string, unknown>
 }
@@ -111,7 +112,18 @@ export const ExternalTools = Rpc.define({
           callID: string,
           result: {
             type: "object",
-            properties: { output: { type: "string" }, title: string, metadata: object },
+            properties: {
+              output: { type: "string" }, title: string, metadata: object,
+              image: {
+                type: "object",
+                properties: {
+                  mime: { enum: ["image/png", "image/jpeg", "image/gif", "image/webp"] },
+                  data: { type: "string", minLength: 4, maxLength: 2_796_204 },
+                },
+                required: ["mime", "data"],
+                additionalProperties: false,
+              },
+            },
             required: ["output"],
             additionalProperties: false,
           },

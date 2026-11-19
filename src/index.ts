@@ -176,6 +176,11 @@ export default Plugin.define({
           entry.settle(undefined, new Error("External tool timed out"))
           throw new BridgeError("not_found", "Call has expired")
         }
+        if (result?.image) {
+          const bytes = Buffer.from(result.image.data, "base64")
+          if (bytes.length > 2 * 1024 * 1024 || bytes.toString("base64") !== result.image.data)
+            throw new BridgeError("invalid_request", "Invalid image payload")
+        }
         entry.settle(result, error === undefined ? undefined : new Error(error))
         return true
       }),
@@ -235,7 +240,10 @@ export default Plugin.define({
               else void rpc.events.emit("requested", { ...call }).catch((error) => settle(undefined, error instanceof Error ? error : new Error(String(error))))
             })
             return {
-              content: result.output,
+              content: result.image ? [
+                { type: "text", text: result.output },
+                { type: "file", mime: result.image.mime, uri: `data:${result.image.mime};base64,${result.image.data}` },
+              ] : result.output,
               metadata: { ...result.metadata, title: result.title ?? tool.name, externalTool: tool.name, externalCallID: call.callID },
             }
           },
