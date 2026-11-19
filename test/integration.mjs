@@ -267,14 +267,17 @@ try {
   assert.deepEqual(calls.map(call => [call?.sessionID, call?.tool, call?.arguments]),
     ids.map(id => [id, 'get_weather', { city: 'Kyiv', count: 5, skip: 0 }]))
   await assert.rejects(rpc('resolve', { sessionID: twin.id, callID: calls[0].callID, result: { output: 'wrong session' } }), /not_found/)
+  const expectedEmbeds = [uiEmbeds, [uiEmbeds[0].replace('TOOL-EMBED-ONLY', 'TOOL-EMBED-ONLY-TWIN')]]
   for (const [i, call] of calls.entries())
-    await rpc('resolve', { sessionID: call.sessionID, callID: call.callID, result: { output: `Native result ${i}`, metadata: { embeds: uiEmbeds } } })
+    await rpc('resolve', { sessionID: call.sessionID, callID: call.callID, result: { output: `Native result ${i}`, metadata: { embeds: expectedEmbeds[i] } } })
   await Promise.all(ids.map(id => api(`/api/experimental/session/${id}/wait`, {})))
   for (const [i, id] of ids.entries()) assert(nativeResults.get(id)?.includes(`Native result ${i}`))
   console.log('OK: identical Code Mode prefixes and paths, isolated calls across concurrent sessions')
-  const nativeTranscript = (await api(`/api/session/${session.id}/message?limit=100&order=asc`)).data
-  const nativeTool = nativeTranscript.flatMap(message => message.content ?? []).find(content => content.type === 'tool' && content.name === 'execute' && content.state.metadata?.embeds)
-  assert.deepEqual(nativeTool?.state.metadata.embeds, uiEmbeds, 'Native execute dropped child UI embeds before durable projection')
+  for (const [i, id] of ids.entries()) {
+    const transcript = (await api(`/api/session/${id}/message?limit=100&order=asc`)).data
+    const tools = transcript.flatMap(message => message.content ?? []).filter(content => content.type === 'tool' && content.name === 'execute')
+    assert.deepEqual(tools.flatMap(tool => tool.state.metadata?.embeds ?? []), expectedEmbeds[i], 'Native execute lost or mixed child UI embeds')
+  }
   assert(uiSuccessMetadata, 'Native execute success event lost child UI embeds')
   assert(!uiMetadataLeaked, 'Child UI HTML leaked to model context')
   const scopedSession = (await api(`/api/session/${session.id}`)).data

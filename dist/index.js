@@ -284,23 +284,38 @@ export default Plugin.define({
             await ctx.tool.hook("execute.before", (event) => {
                 if (event.tool !== "execute" || !catalogs.has(event.sessionID))
                     return;
-                const key = JSON.stringify([event.sessionID, event.messageID, event.id]);
-                const previous = ui.get(key);
+                const key = JSON.stringify([event.sessionID, event.messageID]);
+                const active = ui.get(key) ?? new Map();
+                const previous = active.get(event.id);
                 if (previous)
                     clearTimeout(previous.timer);
-                // baza: interrupted execute may skip execute.after; expire after an hour until Core forwards child metadata itself.
-                const timer = setTimeout(() => ui.delete(key), 3_600_000);
+                const unambiguous = active.size === 0;
+                for (const entry of active.values())
+                    entry.unambiguous = false;
+                // baza: interrupted execute may skip execute.after; expire until Core forwards child metadata itself.
+                const timer = setTimeout(() => {
+                    active.delete(event.id);
+                    if (!active.size)
+                        ui.delete(key);
+                }, 3_600_000);
                 timer.unref();
-                ui.set(key, { embeds: [], timer });
+                active.set(event.id, { embeds: [], timer, unambiguous });
+                ui.set(key, active);
             });
             await ctx.tool.hook("execute.after", (event) => {
-                const key = JSON.stringify([event.sessionID, event.messageID, event.id]);
-                const entry = ui.get(key);
-                if (!entry)
+                const key = JSON.stringify([event.sessionID, event.messageID]);
+                const active = ui.get(key);
+                if (!active)
                     return;
+                const exact = active.get(event.id);
                 if (event.tool === "execute") {
+                    if (!exact)
+                        return;
+                    const entry = exact;
                     clearTimeout(entry.timer);
-                    ui.delete(key);
+                    active.delete(event.id);
+                    if (!active.size)
+                        ui.delete(key);
                     if (event.status !== "completed" || !entry.embeds.length)
                         return;
                     const existing = event.result.metadata?.embeds;
@@ -315,7 +330,11 @@ export default Plugin.define({
                     return;
                 if (!catalogs.get(event.sessionID)?.some((tool) => event.tool === `${tool.namespace.replaceAll(".", "_")}_${tool.name}` && event.result.metadata?.externalTool === tool.name))
                     return;
-                entry.embeds.push(...embeds);
+                // baza: newer Core gives children their own call ID but exposes no parent ID.
+                // Only fall back to a unique, non-overlapping execute in the same message.
+                const sole = active.size === 1 ? active.values().next().value : undefined;
+                const entry = exact ?? (sole?.unambiguous ? sole : undefined);
+                entry?.embeds.push(...embeds);
             });
         }
         // Child sessions inherit native permissions, not external catalogs; strip inherited grants before selection.
@@ -343,8 +362,9 @@ export default Plugin.define({
             closed = true;
             for (const entry of pending.values())
                 entry.settle(undefined, new Error("External tools plugin unloaded"));
-            for (const entry of ui.values())
-                clearTimeout(entry.timer);
+            for (const active of ui.values())
+                for (const entry of active.values())
+                    clearTimeout(entry.timer);
             ui.clear();
             await updates;
             catalogs.clear();

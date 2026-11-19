@@ -32,7 +32,7 @@ export default Plugin.define({
     // baza: catalogs and pending calls are process-local; durable restart recovery needs a persisted queue and replay protocol.
     const catalogs = new Map<string, RegisteredTool[]>()
     const pending = new Map<string, Pending>()
-    const ui = new Map<string, { embeds: string[]; timer: ReturnType<typeof setTimeout> }>()
+    const ui = new Map<string, Map<string, { embeds: string[]; timer: ReturnType<typeof setTimeout>; unambiguous: boolean }>>()
     const prefix = `ext_${crypto.randomUUID().replaceAll("-", "")}_`
     const permissionPrefix = "external_tools_session_"
     let closed = false
@@ -274,21 +274,32 @@ export default Plugin.define({
       // to the outer execute result, not to the text returned to the model.
       await ctx.tool.hook("execute.before", (event) => {
         if (event.tool !== "execute" || !catalogs.has(event.sessionID)) return
-        const key = JSON.stringify([event.sessionID, event.messageID, event.id])
-        const previous = ui.get(key)
+        const key = JSON.stringify([event.sessionID, event.messageID])
+        const active = ui.get(key) ?? new Map()
+        const previous = active.get(event.id)
         if (previous) clearTimeout(previous.timer)
-        // baza: interrupted execute may skip execute.after; expire after an hour until Core forwards child metadata itself.
-        const timer = setTimeout(() => ui.delete(key), 3_600_000)
+        const unambiguous = active.size === 0
+        for (const entry of active.values()) entry.unambiguous = false
+        // baza: interrupted execute may skip execute.after; expire until Core forwards child metadata itself.
+        const timer = setTimeout(() => {
+          active.delete(event.id)
+          if (!active.size) ui.delete(key)
+        }, 3_600_000)
         timer.unref()
-        ui.set(key, { embeds: [], timer })
+        active.set(event.id, { embeds: [], timer, unambiguous })
+        ui.set(key, active)
       })
       await ctx.tool.hook("execute.after", (event) => {
-        const key = JSON.stringify([event.sessionID, event.messageID, event.id])
-        const entry = ui.get(key)
-        if (!entry) return
+        const key = JSON.stringify([event.sessionID, event.messageID])
+        const active = ui.get(key)
+        if (!active) return
+        const exact = active.get(event.id)
         if (event.tool === "execute") {
+          if (!exact) return
+          const entry = exact
           clearTimeout(entry.timer)
-          ui.delete(key)
+          active.delete(event.id)
+          if (!active.size) ui.delete(key)
           if (event.status !== "completed" || !entry.embeds.length) return
           const existing = event.result.metadata?.embeds
           const embeds = Array.isArray(existing) && existing.every((item) => typeof item === "string") ? existing : []
@@ -300,7 +311,11 @@ export default Plugin.define({
         if (!Array.isArray(embeds) || !embeds.every((item) => typeof item === "string")) return
         if (!catalogs.get(event.sessionID)?.some((tool) =>
           event.tool === `${tool.namespace.replaceAll(".", "_")}_${tool.name}` && event.result.metadata?.externalTool === tool.name)) return
-        entry.embeds.push(...embeds)
+        // baza: newer Core gives children their own call ID but exposes no parent ID.
+        // Only fall back to a unique, non-overlapping execute in the same message.
+        const sole = active.size === 1 ? active.values().next().value : undefined
+        const entry = exact ?? (sole?.unambiguous ? sole : undefined)
+        entry?.embeds.push(...embeds)
       })
     }
 
@@ -325,7 +340,7 @@ export default Plugin.define({
     return async () => {
       closed = true
       for (const entry of pending.values()) entry.settle(undefined, new Error("External tools plugin unloaded"))
-      for (const entry of ui.values()) clearTimeout(entry.timer)
+      for (const active of ui.values()) for (const entry of active.values()) clearTimeout(entry.timer)
       ui.clear()
       await updates
       catalogs.clear()

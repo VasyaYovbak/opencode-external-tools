@@ -338,6 +338,9 @@ without leaking HTML into the model context.
   metadata (such as the Open WebUI Pipe) can display them at the `execute` tool
   block; HTML is not added to model-visible text. Other child metadata (for
   example `title` and `externalCallID`) is not propagated to the outer result.
+  On versions that give nested calls their own IDs without exposing a parent
+  ID, embeds are forwarded only when there is one non-overlapping `execute`
+  in the same session and message.
 - State is process-local. Re-register tool sets after a server restart or plugin
   reload. Completing calls from before a restart is not supported.
 - Delivery is not exactly-once. For payments, publishing, and similar operations,
