@@ -78,6 +78,10 @@ for a strict pin, use a full commit hash instead of `v0.1.1`.
 `codemode` defaults to `true`: external tools use native `search` / `execute`,
 without publishing every input schema as a direct model-facing tool. Set
 `"codemode": false` in plugin options for the previous direct-tool behavior.
+Set `"pinned": true` in plugin options to include all external tools available
+to the current session in the initial Code Mode catalog, with their descriptions
+and signatures. This is off by default, only applies in Code Mode, and increases
+prompt size. It does not bypass session or permission checks.
 **Code Mode support is in this checkout; the published `v0.1.1` tag does not yet
 include it.** Use a local plugin path to test this change.
 

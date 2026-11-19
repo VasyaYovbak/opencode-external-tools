@@ -19,6 +19,9 @@ export default Plugin.define({
         const codemode = ctx.options.codemode ?? true;
         if (typeof codemode !== "boolean")
             throw new Error("external-tools: codemode must be a boolean");
+        const pinned = ctx.options.pinned ?? false;
+        if (typeof pinned !== "boolean")
+            throw new Error("external-tools: pinned must be a boolean");
         // baza: catalogs and pending calls are process-local; durable restart recovery needs a persisted queue and replay protocol.
         const catalogs = new Map();
         const pending = new Map();
@@ -202,7 +205,7 @@ export default Plugin.define({
                         description: tool.description,
                         input,
                         options: codemode
-                            ? { namespace: tool.namespace, codemode: true, permission: tool.permission }
+                            ? { namespace: tool.namespace, codemode: true, pinned, permission: tool.permission }
                             : { codemode: false, permission: tool.name },
                         execute: async (input, context) => {
                             await requireSession(context.sessionID);

@@ -10,6 +10,8 @@ import { createHash, randomUUID } from 'node:crypto'
 const root = await mkdtemp('/tmp/opencode/external-tools-smoke-')
 const plugin = process.env.OPENCODE_TEST_PLUGIN ?? fileURLToPath(new URL('../', import.meta.url))
 const codemode = process.env.OPENCODE_TEST_CODEMODE === 'true'
+const pinned = codemode && process.env.OPENCODE_TEST_PINNED === 'true'
+let pinnedInFirstRequest
 let receivedResult = false
 let advertised = false
 let invalidInputSent = false
@@ -33,6 +35,10 @@ const model = createServer(async (req, res) => {
     const nativePrompt = String(recent[0]?.content)
     const native = nativePrompt.includes('NATIVE_SEARCH') || nativePrompt.includes('NATIVE_CALL') || nativePrompt.includes('NATIVE_STALE') || nativePrompt.includes('EMPTY_SEARCH')
     const nativeOutput = recent.find(message => message.role === 'tool')
+    if (nativePrompt === 'PINNED_BUDGET_PROBE' && pinnedInFirstRequest === undefined) {
+      const context = body.messages.filter(m => m.role === 'system' || m.role === 'developer').map(m => JSON.stringify(m.content)).join('\n')
+      pinnedInFirstRequest = context.includes('wide_catalog_probe') && context.includes('field_499: string')
+    }
     if (nativeOutput) {
       if (nativePrompt.includes('NATIVE_SEARCH')) nativeSearch = JSON.parse(nativeOutput.content)
       if (nativePrompt.includes('EMPTY_SEARCH')) emptySearch = JSON.parse(nativeOutput.content)
@@ -84,7 +90,7 @@ const port = reservation.address().port
 await new Promise((resolve) => reservation.close(resolve))
 const base = `http://127.0.0.1:${port}`
 const config = {
-  plugins: [{ package: plugin, options: { timeoutMs: 120000, ...(codemode ? {} : { codemode: false }) } }],
+  plugins: [{ package: plugin, options: { timeoutMs: 120000, ...(codemode ? { pinned } : { codemode: false }) } }],
   model: 'bridge-test/test',
   compaction: {auto:false, keep:{tokens:0}},
   agents: { build: { steps: 3 } },
@@ -223,6 +229,13 @@ try {
   }
   }
   if (codemode) {
+  const { data: catalogSession } = await api('/api/session', { location: { directory: root }, title: 'Pinned catalog budget' })
+  const fields = Array.from({ length: 500 }, (_, i) => `field_${i}`)
+  await rpc('register', { sessionID: catalogSession.id, tools: [{ name: 'wide_catalog_probe', description: 'Wide signature exceeds the normal inline budget', inputSchema: { type: 'object', properties: Object.fromEntries(fields.map(name => [name, { type: 'string' }])), required: fields } }] })
+  await api(`/api/session/${catalogSession.id}/prompt`, { text: 'PINNED_BUDGET_PROBE' })
+  await api(`/api/experimental/session/${catalogSession.id}/wait`, {})
+  assert.equal(pinnedInFirstRequest, pinned, 'Pinned options must override the normal inline catalog budget')
+  await rpc('unregister', { sessionID: catalogSession.id })
   await api(`/api/session/${session.id}/prompt`, { text: 'NATIVE_SEARCH' })
   await api(`/api/experimental/session/${session.id}/wait`, {})
   assert.equal(nativeSearch?.items.length, 1, 'Native search must expose only this session\'s non-denied external tool')
